@@ -216,6 +216,45 @@ CHANNEL_ID="1475813925772722228"
 
 **结论**: 协作频道中，agent 间的任务传递必须通过 `sessions_spawn`，不能靠文字 @提及。
 
+### 让 Agent 交流在 Discord 频道可见
+
+**问题**: `sessions_spawn` 创建的子会话在 session 内部流转，Discord 频道看不到 agent 之间的交流。
+
+**解决方案**: 让 agent 通过 `exec` 工具调用 `openclaw message send` 在团队频道发公告。
+
+```bash
+# Agent 在 SOUL.md 中被指示使用此命令发送频道消息
+openclaw message send --channel discord --target <频道ID> --message '消息内容'
+```
+
+**注意事项**:
+- OpenClaw agent **没有** `message` 工具（不在 DEFAULT_TOOL_ALLOW 中）
+- 即使在 `tools.allow` 中添加 `"message"`，模型也可能不会调用它（取决于 provider 的 tool schema）
+- `exec` + `openclaw message send` 是最可靠的方案——所有 agent 都有 `exec` 工具
+- 每条消息约耗时 2-3 秒（包含 proxy 连接时间）
+
+**SOUL.md 三步走派发流程** (chief-director):
+
+```
+# 第一步：在团队频道公告调度计划
+exec({ "command": "openclaw message send --channel discord --target 1475813925772722228 --message '📋 【任务调度】@笔锋 → 写文章 | @灵犀 → 写文案 | 派发中...'" })
+
+# 第二步：sessions_spawn 实际派发
+sessions_spawn({ "agentId": "content-editor", "task": "...", "mode": "run" })
+
+# 第三步：频道公告结果
+exec({ "command": "openclaw message send --channel discord --target 1475813925772722228 --message '✅ 【完成汇总】@笔锋 已完成 | @灵犀 已完成'" })
+```
+
+**普通 Agent 通信协议** (content-editor 等):
+
+| 时机 | 消息格式 |
+|------|---------|
+| 收到任务 | `📥 【接单】收到任务：xxx | 预计完成：xx:xx` |
+| 关键进展 | `🔄 【进展】xxx | 已完成：xxx | 进行中：xxx` |
+| 任务完成 | `✅ 【完成】xxx | 交付物：xxx` |
+| 遇到问题 | `⚠️ 【问题】xxx | 需要：谁的协助` |
+
 ## 五、Star-Office-UI 可视化监控
 
 ### 架构
@@ -412,6 +451,8 @@ openclaw models auth status
 □ 总监/调度者的 SOUL.md 包含 sessions_spawn 使用说明和示例
 □ AGENTS.md 的任务分配模板包含"两步流程"
 □ 协作频道已创建，所有 agent 绑定了该频道
+□ 所有 agent 的 SOUL.md 包含通信协议（`exec` + `openclaw message send` 发频道公告）
+□ chief-director 使用三步走派发流程（公告→spawn→汇总）
 □ 每个 agent 配置了 groupChat.mentionPatterns
 □ proxy-preload.cjs 已配置（plist 中的 NODE_OPTIONS）
 □ monitor.py 使用双信号检测活跃（.jsonl mtime + sessions.json updatedAt 内容）
