@@ -291,14 +291,57 @@ def _get_latest_session_updated_at(sessions_dir):
 | `"error"` + `"role":"system"` | error |
 | 无匹配 / 文件不存在 | idle |
 
+### ⚠️ app.py AUTO_IDLE_TTL 陷阱（关键 Bug）
+
+`app.py` 的 `/status` 端点有一个 `_apply_auto_idle()` 函数，会在 `updated_at` 超过 `AUTO_IDLE_TTL` 秒后强制将 agent 状态改回 idle。
+
+**问题链**:
+1. monitor.py 检测到 agent 活跃，写入 `state = "writing"`, `updated_at = now`
+2. monitor.py 只在状态**变化**时更新 `updated_at`
+3. agent 持续 writing，状态不变，`updated_at` 不刷新
+4. `AUTO_IDLE_TTL` 秒后，`_apply_auto_idle` 在 `/status` 返回前强制重置为 idle
+5. UI 轮询 `/status` 看到 idle，agent 回到休息区
+
+**修复（两处都必须改）**:
+
+```python
+# app.py — 增大 TTL，让 monitor.py 负责真正的 idle 检测
+AUTO_IDLE_TTL = 600  # 原来是 25，远小于 ACTIVE_THRESHOLD
+
+# monitor.py — 每次 poll 都刷新活跃 agent 的 updated_at，不仅仅在状态变化时
+if active:
+    # ... detect state ...
+    if agent.get("state") != new_state:
+        agent["state"] = new_state
+        agent["updated_at"] = str(now)
+        changed = True
+    else:
+        # 即使状态没变，也刷新时间戳，防止 app.py 的 safety-net 误判
+        agent["updated_at"] = str(now)
+        changed = True
+```
+
+### UI 状态映射
+
+UI 需要为所有 monitor.py 能输出的状态定义 STATE_COLORS、ZONES 和 BUBBLES，否则未映射状态（如 `dispatching`）会 fallback 到 idle 区域。
+
+```javascript
+// 必须在 index.html 中添加:
+STATE_COLORS.dispatching = '#E056A0';
+ZONES.dispatching = { label: 'Meeting', rects: [[350, 60, 260, 140]] };
+BUBBLES.dispatching = ['📋 派发任务', '🚀 分配', '📤 调度'];
+```
+
 ### 常见问题
 
 | 问题 | 原因 | 修复 |
 |------|------|------|
+| Agent 在工作但 25 秒后回到休息区 | `app.py` 的 `AUTO_IDLE_TTL=25` 太短 + monitor 不刷新时间戳 | AUTO_IDLE_TTL=600 + monitor 每 poll 刷新 updated_at |
 | Agent 在工作但可视化显示 idle | ACTIVE_THRESHOLD 太短（LLM 调用期间 jsonl 不更新） | 改为 300 秒 + 启用 sessions.json updatedAt 双信号 |
 | 所有 agent 都显示非 idle | sessions.json mtime 被 gateway 重启刷新 | 不用 sessions.json mtime，用其 JSON 内容的 updatedAt |
 | 可视化不更新 | 多个 monitor 进程冲突 | `pkill -f monitor.py` 杀掉所有旧进程再重启 |
 | state.json 解析失败 | 文件损坏（多余的 `}`） | 手动修复 JSON |
+| dispatching 状态 agent 在休息区 | UI 缺少 dispatching 的颜色/区域/气泡映射 | 添加到 STATE_COLORS、ZONES、BUBBLES |
 | 部分 agent 检测到、部分没检测到 | 只用单信号、阈值不够 | 双信号 OR + 300s 阈值 |
 
 ## 六、代理架构（Proxy）
@@ -372,7 +415,10 @@ openclaw models auth status
 □ 每个 agent 配置了 groupChat.mentionPatterns
 □ proxy-preload.cjs 已配置（plist 中的 NODE_OPTIONS）
 □ monitor.py 使用双信号检测活跃（.jsonl mtime + sessions.json updatedAt 内容）
+□ monitor.py 每次 poll 都刷新活跃 agent 的 updated_at（不仅仅在状态变化时）
 □ ACTIVE_THRESHOLD >= 300 秒（thinking 模型单次调用可达 2 分钟）
+□ app.py 的 AUTO_IDLE_TTL >= 600 秒（不能小于 ACTIVE_THRESHOLD，否则 /status 会提前重置）
+□ index.html 的 STATE_COLORS / ZONES / BUBBLES 包含所有 monitor 输出的状态（含 dispatching）
 □ 只有一个 monitor 进程在运行（`pkill -f monitor.py` 后再启动）
 □ OAuth token 已同步且未过期
 ```
