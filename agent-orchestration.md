@@ -5,7 +5,7 @@ description: Discord-based multi-agent orchestration for OpenClaw. Use when sett
 
 # Discord 多 Agent 编排技能
 
-本技能覆盖 OpenClaw 多 Agent 系统的完整编排链路：权限配置 → 任务派发 → 协作频道 → 可视化监控。
+本技能覆盖 OpenClaw 多 Agent 系统的完整编排链路：权限配置 → 任务派发 → 频道通信 → 人格化消息 → 可视化监控。
 
 ## 架构总览
 
@@ -15,7 +15,8 @@ description: Discord-based multi-agent orchestration for OpenClaw. Use when sett
 OpenClaw Gateway (ws://127.0.0.1:18789)
   ↓ bindings 路由
 Agent Session (e.g. chief-director)
-  ↓ sessions_spawn
+  ↓ sessions_spawn (派发任务)
+  ↓ exec team-msg.sh (频道 embed 消息)
 Sub-Agent Session (e.g. content-editor)
   ↓ announce 回传
 Parent Session → Discord 频道回复
@@ -25,6 +26,8 @@ Parent Session → Discord 频道回复
 - 所有 Agent 共用一个 Discord bot 身份（@macstudio）
 - bot 自己的消息被 gateway 跳过，不会触发任何 agent
 - Agent 间任务派发必须通过 `sessions_spawn` 工具，文字 @提及无效
+- Agent 频道消息通过 `exec` + `team-msg.sh` 发送 Discord embed（带头像、彩色边框）
+- Agent 直接回复（gateway 自动发的）应尽量为空或极简，避免与 embed 重复
 
 ## 一、Agent 间通信权限
 
@@ -47,7 +50,7 @@ Parent Session → Discord 频道回复
     "allow": ["chief-director", "content-editor", "copywriter", ...]
   },
   "sessions": {
-    "visibility": "all"  // agent 可看到所有 session
+    "visibility": "all"
   }
 }
 
@@ -62,12 +65,11 @@ Parent Session → Discord 频道回复
       "id": "content-editor",
       "subagents": { "allowAgents": ["*"] }
     }
-    // ... 所有 agent 都需要配置
   ]
 }
 ```
 
-### ⚠️ 陷阱: allowAgents 位置
+### 陷阱: allowAgents 位置
 
 ```
 ❌ agents.defaults.subagents.allowAgents  → 报错 "Unknown config keys"
@@ -78,73 +80,288 @@ Parent Session → Discord 频道回复
 
 | 拓扑 | 配置 | 适用场景 |
 |------|------|---------|
-| 星型 | 只给总监 `allowAgents: ["*"]` | 简单指令下发，总监是唯一调度者 |
-| 网状 | 所有 agent 都配置 `allowAgents: ["*"]` | 协同工作流，agent 间可互相协作 |
+| 星型 | 只给总监 `allowAgents: ["*"]` | 简单指令下发 |
+| 网状 | 所有 agent 都配置 `allowAgents: ["*"]` | 协同工作流，推荐 |
 
-**推荐网状拓扑** — 避免总监成为瓶颈，每个角色可以直接找协作方。
+## 二、团队频道消息系统（team-msg.sh）
 
-## 二、SOUL.md 编写规范（核心教训）
+### 为什么不用 openclaw message send
 
-### 问题场景
+`openclaw message send` 发的是纯文本消息，没有头像、没有颜色、没有身份标识，可读性差。
 
-SOUL.md 写了"收到图文任务 → 路由给 content-editor"，但 agent 不知道"路由"的技术手段，
-只是在回复文字中写 `@笔锋 请完成xxx` → **无任何效果**（bot 自己的消息被 gateway 跳过）。
+### 解决方案：team-msg.sh — Discord Embed 消息
 
-### 解决方案: 在 SOUL.md 中明确 sessions_spawn 用法
+脚本位置：`~/.openclaw/bin/team-msg.sh`
 
-在 SOUL.md 的调度规则后面，必须添加**派发方法**章节：
+**功能**：
+- 每个 agent 有独立头像（DiceBear open-peeps 手绘风）、颜色边框、显示名
+- 消息以 Discord embed 格式发送，可读性强
+- 彩色圆形头像背景，兼容 dark mode
 
-```markdown
-## ⚠️ 派发方法（必须遵守）
-
-**分配任务时，你必须使用 `sessions_spawn` 工具来实际派发任务。**
-仅仅在消息文本中写 @某人 是无效的——对方不会收到任何通知，任务不会被执行。
-
-### 正确做法
-1. 先在频道回复中说明你的调度计划（让用户看到）
-2. 然后对每个任务，调用 `sessions_spawn` 工具：
-   - `agentId`: 目标 Agent 的 ID
-   - `task`: 完整的任务描述
-   - `mode`: 使用 `run`
-
-### 示例
-sessions_spawn({
-  "agentId": "content-editor",
-  "task": "完成本周内容排期主表。要求：...",
-  "mode": "run"
-})
-
-### 禁止做法
-- ❌ 仅在回复文本中写 @Agent名称
-- ❌ 把多个任务合并到一条消息里用@提及
-- ✅ 每个任务单独调用一次 sessions_spawn
+**用法**：
+```bash
+~/.openclaw/bin/team-msg.sh <agent-id> '消息内容'
 ```
 
-### AGENTS.md 配套修改
+**Agent ID → 显示名 / 颜色映射**：
 
-任务分配模板改为两步流程：
+| Agent ID | 显示名 | embed 颜色 | 头像背景色 |
+|----------|--------|-----------|-----------|
+| chief-director | 总监·策略 | #F4A460 (橙) | fed7aa |
+| content-editor | 笔锋 · 内容编辑 | #22C55E (绿) | bbf7d0 |
+| copywriter | 灵犀 · 文案策划 | #6366F1 (靛) | c7d2fe |
+| visual-designer | 像素 · 视觉设计 | #E9C308 (黄) | fde68a |
+| wechat-ops | 微澜 · 公众号运营 | #2EC4B6 (青) | a7f3d0 |
+| community-ops | 织网 · 社群运营 | #9B59B6 (紫) | e9d5ff |
+| data-analyst | 洞见 · 数据分析 | #3B82F6 (蓝) | bfdbfe |
+| business-dev | 纽带 · 商务合作 | #EC4899 (粉) | fbcfe8 |
+| video-director | 光影 · 视频编导 | #F97316 (橙) | fdba74 |
+| video-editor | 蒙太奇 · 视频剪辑 | #607D8B (灰蓝) | cbd5e1 |
+| short-video-ops | 流量 · 短视频运营 | #A020F0 (紫) | d8b4fe |
+
+**头像系统**：
+- API: `https://api.dicebear.com/9.x/open-peeps/png?size=128&radius=50&seed={seed}&backgroundColor={hex}`
+- 每个 agent 有唯一 seed（如 `boss-nolan-v3`, `writer-aidan-v3`）
+- `radius=50` 生成圆形头像
+- `backgroundColor` 使用柔和色，确保 dark mode 可见
+- 如果 Discord 缓存了旧头像，改 seed 后缀强制刷新（如 `-v3` → `-v4`）
+
+**技术细节**：
+- 使用 Discord Bot API 直接 POST embed 消息
+- Bot Token: 从 team-msg.sh 脚本读取
+- 需要 proxy `http://127.0.0.1:10808`
+- `\n` 转换：shell 单引号中的 `\n` 是字面量，脚本内用 sed 转换后再 JSON 编码
+
+### 文件上传：team-file.sh
+
+脚本位置：`~/.openclaw/bin/team-file.sh`
+
+**用途**：把文件作为 Discord 附件上传到频道（附带 embed 说明）
+**用法**：`~/.openclaw/bin/team-file.sh <agent-id> <文件路径> '说明文字'`
+
+Evan 在 Discord 上看不到本地文件路径。所有交付文件必须通过 team-file.sh 上传为 Discord 附件。
+
+### 在 SOUL.md 中的使用方式
 
 ```markdown
-## 任务分配流程
+## 📢 团队频道通信（必须遵守）
 
-### 第一步：在频道中发布调度计划（让用户可见）
-📋 任务分配
-- 负责人: [Agent名称]
-- 任务: [具体描述]
-- 交付物: [预期产出]
-- 截止时间: [日期时间]
-
-### 第二步：用 sessions_spawn 实际派发
-sessions_spawn({
-  "agentId": "content-editor",
-  "task": "完整任务描述...",
-  "mode": "run"
-})
-
-⚠️ 仅在消息文本中写 @Agent名称 不会触发任何Agent执行。
+发消息：exec({ "command": "~/.openclaw/bin/team-msg.sh <agent-id> '你要说的话'" })
+传文件：exec({ "command": "~/.openclaw/bin/team-file.sh <agent-id> /path/to/file.md '说明'" })
 ```
 
-## 三、sessions_spawn 工具参数
+## 三、SOUL.md 编写规范（核心经验）
+
+### 会议优先五步走派发流程（chief-director）
+
+**核心规则：先开会讨论，至少2轮共识后才能动手。**
+
+```
+# 第一步：在频道宣布开会
+exec({ "command": "~/.openclaw/bin/team-msg.sh chief-director '各位进会议室，Evan要三篇深度文...我的初步想法是...大家说说看法。'" })
+
+# 第二步：spawn 全员讨论（第1轮——只讨论不动手）
+sessions_spawn({ "agentId": "content-editor", "task": "选题讨论会（第1轮）：...请在频道发表意见。这轮只讨论，不要动笔。", "mode": "run" })
+sessions_spawn({ "agentId": "copywriter", "task": "选题讨论会（第1轮）：...请在频道发表意见。这轮只讨论，不要动笔。", "mode": "run" })
+sessions_spawn({ "agentId": "data-analyst", "task": "选题讨论会（第1轮）：...请在频道发表意见。这轮只讨论，不要动笔。", "mode": "run" })
+# ... spawn 所有相关角色
+
+# 第三步：收到全员意见后，总结 + 发起第2轮
+exec({ "command": "~/.openclaw/bin/team-msg.sh chief-director '第一轮讨论收到了。笔锋说得有道理...灵犀的建议也好...综合调整为...大家觉得怎样？'" })
+sessions_spawn({ ... 第2轮讨论 spawn，同样只讨论不动手 })
+
+# 第四步：共识达成后，拍板 + 分配执行任务
+exec({ "command": "~/.openclaw/bin/team-msg.sh chief-director '好，方向定了。笔锋写X，灵犀做Y，洞见出Z。各自开工。'" })
+sessions_spawn({ "agentId": "content-editor", "task": "经过讨论共识：你的执行任务是...", "mode": "run" })
+
+# 第五步：收到成果 → 审核 → team-file.sh 上传
+# 直接回复只说：好的
+```
+
+### 直接回复规则（所有 agent 必须遵守）
+
+Agent 有两个输出通道：
+1. **直接文本回复** — gateway 自动发回 Discord，显示为 macstudio 的普通消息
+2. **team-msg.sh embed** — 通过 exec 调用，显示为带头像的彩色 embed
+
+**关键区分**：
+- **顶级 agent（chief-director）**：直接回复只写 `NO_REPLY`。Gateway 识别该 token 后完全抑制消息发送。且**不能在工具调用旁附带任何文字**——每次文本输出都会被发到 Discord。
+- **其他 10 个 agent**：直接回复只说 `已完成，详见频道。`。**绝对不能用 `NO_REPLY`**！
+
+**为什么非总监 agent 不能用 NO_REPLY**：`NO_REPLY` 即 `SILENT_REPLY_TOKEN`（源码 `tokens-*.js` line 5）。`runSubagentAnnounceFlow()` 的 `isSilentReplyText()` 检查会匹配该 token — 如果子 agent 回复 NO_REPLY，整个 announce 被静默跳过，父 session（总监）永远收不到完成通知。
+
+**为什么不用"好的"**：agent 的直接回复文本会作为 `findings` 出现在 announce 的 `triggerMessage` 中。总监收到 "Result: 好的" 两个字，会误以为 agent 在敷衍，发出"你这两个字是在敷衍我吗？"的回复。`已完成，详见频道。` 更有信息量。
+
+**原因**：直接回复和 embed 内容重复，用户会看到同样的信息出现两次。
+
+SOUL.md 写法：
+```markdown
+## ⚠️ 直接回复规则（极其重要）
+
+你的直接文本回复应该尽量不输出。所有沟通通过 team-msg.sh embed 完成。
+如果必须有文本输出，只说：`已完成，详见频道。`
+绝对不要在直接回复里重复 embed 已经说过的内容。
+```
+
+### 格式禁令（所有 agent 必须遵守）
+
+这是最容易被 LLM 违反的规则，必须写得极其明确。
+
+```markdown
+## ⛔ 格式禁令（违反等于任务失败，适用于你所有输出）
+
+### 规则一：行首绝对禁止出现 emoji
+不管什么 emoji，不管后面跟什么内容，行首不许有 emoji。
+`📝 主题：` `📊 字数：` `✅ 案例：` `📋 计划：` `🔍 来源：` `📁 文件：` — 全部禁止。
+
+### 规则二：禁止结构化汇报
+不要像填表一样汇报。多行 emoji 列表、`字段名：值` 的罗列、`**加粗标签**：内容` 的格式、像 JIRA 一样的格式化报告 — 全部禁止。
+
+### 规则三：称呼用名字，不用 agent ID
+叫名字：笔锋、灵犀、洞见、像素、微澜、织网、纽带、光影、蒙太奇、流量、总监。
+禁止：@content-editor、@copywriter、@data-analyst、@chief-director 等 agent ID。
+
+### 对比示范
+错误（像机器人）：
+📝 主题：OpenClaw实战案例 / 📊 字数：2150字 / ✅ 案例：5个 / @data-analyst 帮忙核实
+
+正确（像人说话）：
+初稿写好了，2150字，5个案例都走完了。洞见帮忙核实下数据，灵犀看看标题传播力够不够。
+```
+
+**经验**：
+- 仅列出几个常见 emoji 不够——LLM 会用其他 emoji 绕过（如 📝、🔍）
+- 必须用"行首不许有 emoji"这种绝对规则
+- 必须给正反对比示范，否则模型不知道"人话"长什么样
+- 必须明确禁止 agent ID，并给出名字对照表
+
+### 消息数量控制（chief-director 专用）
+
+```markdown
+### 消息数量控制
+- 每次调度只发一条频道消息，把任务分工、截止时间、注意事项写在同一条里
+- 不要先发一条"分工"、再发一条"分工总结" — 这是重复信息
+- 后续有新进展（比如子 Agent 交稿）再发新消息
+```
+
+### 人格化性格系统
+
+每个 agent 的 SOUL.md 包含 `## 性格与沟通` 章节，定义独特的叛逆性格：
+
+| Agent | 核心性格 | 典型行为 |
+|-------|---------|---------|
+| 总监·策略 | 有主见但能被说服 | 会挑战团队方案，允许辩论后拍板 |
+| 笔锋 | 内容质量洁癖 | 会说"这个选题太烂了"，跟灵犀互怼 |
+| 灵犀 | 创意至上 | 挑战"安全"方案，觉得大多数内容太无聊 |
+| 洞见 | 数据怼一切 | "数据不支持你这个判断"，用百分比说话 |
+| 像素 | 审美固执 | 会直接说"这个丑"，拒绝低审美需求 |
+| 微澜 | 数据务实 | "上次这种选题阅读量才800，你确定还要做？" |
+| 织网 | 用户代言人 | "你们根本不懂用户"，带着社群真实反馈开会 |
+| 纽带 | ROI 导向 | "做这个能带来什么商业价值？" |
+| 光影 | 创作理念强 | 跟总监争创作方向，不喜欢被指挥怎么拍 |
+| 蒙太奇 | 技术自信 | "这个效果做出来会很 low"，用时间码说话 |
+| 流量 | 纯数据驱动 | "你这个封面点击率不会超过2%" |
+
+**关键**：
+- agent 之间有预设的互动关系（笔锋 vs 灵犀互怼、光影 vs 蒙太奇搭档但争节奏）
+- 禁止"所有人都同意没人反驳"的和谐对话
+- 禁止无脑说"收到"就开始干——先评估、先质疑、先提建议
+
+### 会议讨论机制（关键）
+
+任务下达后不能直接开工，必须先进"会议室"讨论。标准 3 轮讨论（亮牌→交锋→终极辩论）后才分工执行。
+
+**流程**：
+1. 总监宣布开会 → spawn 全员讨论（第1轮·亮牌，至少 5-6 人，只发意见不干活）
+2. 总监等所有 announce 到齐 → 总结分歧+站队+挑衅 → spawn 第2轮（正面交锋）
+3. 总监等所有 announce 到齐 → 判断碰撞是否充分 → 通常 spawn 第3轮（终极辩论）
+4. 总监等所有 announce 到齐 → 拍板+立即 spawn 执行（同一次响应中完成，不能分两步）
+5. 收到执行结果 → 审核点评 → 向 Evan 汇报
+
+**讨论轮的 spawn task 写法**：
+- 明确写"选题讨论会（第N轮）"
+- 明确写"只讨论，不要动笔/不要执行"
+- 要求用 team-msg.sh 在频道发表专业意见
+- 第2轮要制造正面交锋："笔锋说X，灵犀说Y，总监倾向X——灵犀你怎么反驳？"
+
+### ⛔ 计数规则（防止遗漏队友意见）
+
+这是最容易出错的地方。总监收到大多数 announce 后会急着总结推进，导致最后一两个晚到几秒的 announce 被忽略。
+
+**规则**：spawn 了几个 agent，就必须等几个 announce 回来。不是"大多数"，是"全部"。
+
+- 每收到一个 announce，计数 +1
+- 如果还没收到所有人的回复，文本回复只写 NO_REPLY（继续等下一个 announce）
+- 只有当所有人都到齐了，才可以总结这一轮并推进下一轮
+- 绝对不要说"XXX 可能因系统问题没送达"——announce 不是同时到的，后面的可能晚几秒
+
+**真实错误**：在连续 3 轮测试中，总监每一轮都漏掉一个人——第1轮说"洞见可能因系统问题没送达"（其实洞见已发），第2、3轮连续说"灵犀可能没送达"（灵犀都发了）。根因是 SOUL.md 中有矛盾指令："收到大多数就推进" vs "尽量等所有人"，模型选了前者。
+
+**修复**：清除所有 "收到大多数就推进" 的指令，统一为 "spawn 了 N 个就等 N 个"。在禁止做法中加入 "假设某人因系统问题没送达然后跳过他"。
+
+### ⛔ 自动续流规则
+
+总监的整个流程必须是一个连续动作，中间不停顿、不等 Evan 确认。
+
+**致命错误**：拍板后说 "准备拍板派活，你如果对方向有异议现在说" — 这是在等 Evan 确认，流程会停死。
+
+**正确做法**：拍板 = 立即 spawn 执行，在同一次响应中完成（exec team-msg.sh 发拍板消息 + sessions_spawn 派发任务 + NO_REPLY）。
+
+**Discord 频道时间线效果**：
+```
+总监: 各位进会议室，这次要做三篇AI横评...
+笔锋: 选题我有看法，纯横评太浅了，应该加实操对比...
+灵犀: 标题要带争议性才有传播力，"AI工具横评"这种标题没人点...
+洞见: 数据显示"怎么选AI工具"搜索量是"AI横评"的3倍...
+总监: 第一轮讨论收到了。笔锋说得对，角度调一下...大家觉得新方向怎样？
+笔锋: 新方向可以，但字数建议增加到3500...
+灵犀: 同意调整，标题我有三个方案供选...
+总监: 好，方向定了。笔锋写X，灵犀做Y。各自开工。
+```
+
+**关键**：讨论轮和执行轮是完全分开的 sessions_spawn 调用。第1-2轮只出意见，第3轮以后才出成果。
+
+### 文件交付规则
+
+Agent 完成任务后必须用 `team-file.sh` 上传文件到 Discord 频道。不能只给本地路径。
+
+```bash
+# 发消息
+~/.openclaw/bin/team-msg.sh <agent-id> '消息'
+
+# 上传文件（附带说明）
+~/.openclaw/bin/team-file.sh <agent-id> /path/to/file.md '这是初稿，2800字，角度用了对比场景切入'
+```
+
+### 性格数据源
+
+完整性格定义在 `/tmp/personality-update.json`，包含每个 agent 的：
+- `personality_section`：完整的 `## 性格与沟通` markdown 内容
+- 说话方式、互动关系、典型台词
+
+### SOUL.md 调试实战经验（Round 3-6 总结）
+
+这些经验来自连续 6 轮测试迭代，解决了 announce 泄露、流程停滞、重复上传等问题。
+
+**1. 矛盾指令是最大的隐患**
+SOUL.md 中如果有"尽量等所有人"和"收到大多数就推进"两条矛盾指令，模型会选择更容易的那条（推进）。务必检查所有指令的一致性。
+
+**2. 真实错误示范比抽象规则有效 10 倍**
+"不要在直接回复中写详细内容"这种抽象规则，模型经常违反。改为列举 3-5 条"你在测试中犯过的真实错误"（附具体文字），效果立竿见影。
+
+**3. GLM-5 会把代码块当文字输出**
+SOUL.md 中的 ``` 代码块示例（如 `exec({...})`）会被 GLM-5 当成字面文字输出到 Discord。改用自然语言描述：「调用 exec 工具，command 参数填 `~/.openclaw/bin/team-msg.sh agent-id '消息'`」
+
+**4. 清理旧会话文件时要彻底**
+SOUL.md 修改后，必须清空 sessions.json 到 `{}`。如果 workspace 目录下有上次测试的残留文件（如 article-draft.md），总监可能会找到旧文件直接说"稿子已经完成了"，跳过整个讨论流程。
+
+**5. deliver: false 会破坏队列排水**
+`shouldDeliverExternally = false` 看似安全（阻止外部投递），但实际破坏了 `maybeQueueSubagentAnnounce` 的队列排水机制，导致并发 announce 只有第一个能投递。
+
+**6. 讨论轮数和发言长度建议写在 SOUL.md 里**
+"讨论发言要简短有力。150-250字把观点和理由说清楚" — 没有这条约束，agent 会写 500+ 字的长篇大论。
+
+## 四、sessions_spawn 工具参数
 
 ```json
 {
@@ -162,36 +379,86 @@ sessions_spawn({
 
 **返回值**: `{ status: "accepted", runId, childSessionKey }`
 
-**announce 机制**: 子 agent 完成后自动向父会话回传结果（状态、产出、耗时、token 用量）。
-如果父会话绑定了 Discord 频道，结果会自动发到该频道。
+**announce 机制**: 子 agent 完成后自动向父会话回传结果。如果父会话绑定了 Discord 频道，结果会自动发到该频道。
 
 **子 agent 限制**: 默认无法使用 session 工具（sessions_spawn/send/list/history 被拒绝）。
 
-## 四、Discord 协作频道配置
+## 四-B、Announce Flow 内部机制与泄露防护（深度解析）
 
-### 目标
-让所有 agent 在一个 Discord 频道中协作，用户可以看到讨论过程。
+### Announce 两条投递路径
+
+源码位于 `dist/subagent-registry-CVXe4Cfs.js` 的 `runSubagentAnnounceFlow()` 函数。子 agent 完成后有两条路径将结果投递给父 agent：
+
+| 路径 | 变量 | 行为 | 风险 |
+|------|------|------|------|
+| **Path A** (line ~78471) | `shouldSendCompletionDirectly` | 直接把 `completionMessage`（"✅ Subagent XXX finished\n\n{findings}"）通过 `callGateway({method:"send"})` 发到 Discord — **绕过父 agent** | 系统消息和 findings 原文泄露到 Discord |
+| **Path B** (line ~78522) | `shouldDeliverExternally` | 把 `triggerMessage`（含 findings）通过 `callGateway({method:"agent", deliver: true/false})` 发给父 agent，父 agent 处理后回复 | 如果父 agent 的回复不是 NO_REPLY，回复文本会泄露到 Discord |
+
+### `requesterIsSubagent` 陷阱（最关键的坑）
+
+`requesterIsSubagent` 基于 session depth：
+- depth > 0（子 agent 的子 agent）→ `requesterIsSubagent = true`
+- **depth = 0（Discord-bound 顶级 session）→ `requesterIsSubagent = false`**
+
+如果 chief-director 是从 Discord 频道触发的，它的 session depth = 0。即使它是其他 agent 的"父 agent"，在 announce flow 中 `requesterIsSubagent = false`。这意味着专门针对 `requesterIsSubagent = true` 的 patch 对 chief-director **完全不生效**。
+
+### 推荐的源码 Patch（防止泄露）
+
+```javascript
+// 1. 禁用 Path A（防止 "✅ Subagent XXX finished" 泄露）
+//    line ~78473
+let shouldSendCompletionDirectly = false;  // 原值依赖条件计算
+
+// 2. Path B 的 deliver 保持原值（不要改为 false！）
+//    line ~78516 — 保持原始逻辑不动
+//    ⚠️ 设 deliver: false 会破坏 announce 队列排水机制，只有 1/6 的 announce 能投递
+
+// 3. 统一 buildAnnounceReplyInstruction（所有三个分支）
+//    lines ~78649-78651
+//    原值："Convert this completion into a concise internal orchestration update..."
+//    新值（三个分支统一）：
+`A subagent task has completed. Review the result and take any needed action using your tools (e.g. exec). Your text reply MUST be ONLY: ${SILENT_REPLY_TOKEN} — any descriptive text you output will leak to external channels. Communicate all updates through tool calls, not text output.`
+```
+
+**致命错误记录**：
+- 把 `shouldDeliverExternally` 设为 `false` → 破坏 announce 队列（`maybeQueueSubagentAnnounce` 的排水依赖 `deliver: true`），6 个 announce 只有 1 个能投递到父 agent
+- 只 patch `requesterIsSubagent = true` 的分支 → 对 Discord-bound 的 chief-director 无效（depth = 0 → false）
+
+### `SILENT_REPLY_TOKEN = "NO_REPLY"` 的双面性
+
+| 使用者 | 行为 | 安全性 |
+|--------|------|--------|
+| 顶级 agent（chief-director）| 回复 NO_REPLY → gateway regex 抑制发送 | ✅ 正确，防止泄露 |
+| 子 agent（content-editor 等）| 回复 NO_REPLY → `isSilentReplyText()` 匹配 → announce 被静默跳过 | ❌ 危险！父 agent 永远收不到通知 |
+
+**规则**：只有顶级 agent 使用 NO_REPLY，子 agent 使用 `已完成，详见频道。`
+
+### 执行成果处理（防止重复上传）
+
+当执行 agent（如笔锋）完成任务并通过 `team-file.sh` 上传了文件，总监收到 announce 时：
+1. 不要再次上传同一个文件（agent 已上传）
+2. 不要在回复中复述文章内容（会通过 Path B 的 deliver 泄露到 Discord）
+3. 通过 `team-msg.sh` 发一条简短的 Evan 汇报
+4. 文本回复只写 NO_REPLY
+
+必须在 chief-director SOUL.md 中明确写出这个规则，并给出正反例。
+
+## 五、Discord 协作频道配置
 
 ### 配置步骤
 
-```bash
-# 1. 获取频道 ID（从 Discord URL 或右键复制 ID）
-CHANNEL_ID="1475813925772722228"
-```
-
 ```json
-// 2. openclaw.json — 为每个 agent 添加频道绑定
+// openclaw.json — 为每个 agent 添加频道绑定
 "bindings": [
-  // ... 已有的单 agent 频道绑定 ...
+  // 已有的单 agent 频道绑定...
 
-  // 协作频道: 所有 agent 都绑定同一个频道
-  { "agentId": "chief-director", "match": { "channel": "discord", "peer": { "kind": "channel", "id": "CHANNEL_ID" } } },
-  { "agentId": "content-editor", "match": { "channel": "discord", "peer": { "kind": "channel", "id": "CHANNEL_ID" } } },
-  { "agentId": "copywriter",     "match": { "channel": "discord", "peer": { "kind": "channel", "id": "CHANNEL_ID" } } }
-  // ... 所有 agent
+  // 协作频道: 所有 agent 都绑定同一个频道 (会议室)
+  { "agentId": "chief-director", "match": { "channel": "discord", "peer": { "kind": "channel", "id": "1475813925772722228" } } },
+  { "agentId": "content-editor", "match": { "channel": "discord", "peer": { "kind": "channel", "id": "1475813925772722228" } } },
+  // ... 所有 11 个 agent
 ]
 
-// 3. 每个 agent 添加 groupChat 配置
+// 每个 agent 添加 groupChat 配置
 "agents": {
   "list": [
     {
@@ -205,57 +472,50 @@ CHANNEL_ID="1475813925772722228"
 }
 ```
 
-### ⚠️ 关键限制
+### 关键限制
 
 | 行为 | 是否触发 agent | 原因 |
 |------|---------------|------|
-| 用户在频道 @总监 | ✅ 触发 chief-director | 用户消息 + mentionPattern 匹配 |
-| 用户在频道直接发消息 | ❌ 不触发 | 无 mentionPattern 匹配 |
-| Bot 回复中写 @笔锋 | ❌ 不触发 | Gateway 跳过 bot 自己的消息 |
-| Agent 调用 sessions_spawn | ✅ 触发目标 agent | 通过工具直接调度 |
+| 用户在频道 @总监 | 触发 chief-director | 用户消息 + mentionPattern 匹配 |
+| 用户在频道直接发消息 | 不触发 | 无 mentionPattern 匹配 |
+| Bot embed 中写 @笔锋 | 不触发 | Gateway 跳过 bot 自己的消息 |
+| Agent 调用 sessions_spawn | 触发目标 agent | 通过工具直接调度 |
 
-**结论**: 协作频道中，agent 间的任务传递必须通过 `sessions_spawn`，不能靠文字 @提及。
+## 六、会话管理与生效流程
 
-### 让 Agent 交流在 Discord 频道可见
+### SOUL.md 修改后的生效流程（极其重要）
 
-**问题**: `sessions_spawn` 创建的子会话在 session 内部流转，Discord 频道看不到 agent 之间的交流。
-
-**解决方案**: 让 agent 通过 `exec` 工具调用 `openclaw message send` 在团队频道发公告。
+SOUL.md 的修改不会立即生效——旧会话中已经加载了旧版 SOUL.md 内容。必须：
 
 ```bash
-# Agent 在 SOUL.md 中被指示使用此命令发送频道消息
-openclaw message send --channel discord --target <频道ID> --message '消息内容'
+# 1. 清理所有 agent 的活跃会话
+for agent_dir in ~/.openclaw/agents/*/sessions/; do
+  agent=$(echo "$agent_dir" | sed 's|.*agents/||;s|/sessions/||')
+  [ "$agent" = "main" ] && continue
+
+  # 备份活跃会话文件
+  mkdir -p "${agent_dir}backup_$(date +%Y%m%d_%H%M)" 2>/dev/null
+  find "$agent_dir" -maxdepth 1 \( -name "*.jsonl" -o -name "*.jsonl.lock" \) | while read f; do
+    mv "$f" "${agent_dir}backup_$(date +%Y%m%d_%H%M)/" 2>/dev/null
+  done
+
+  # 重置 sessions.json
+  echo '{}' > "${agent_dir}sessions.json"
+done
+
+# 2. 重启 gateway
+launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
+
+# 3. 验证
+sleep 2 && pgrep -fl "openclaw-gateway"
 ```
 
-**注意事项**:
-- OpenClaw agent **没有** `message` 工具（不在 DEFAULT_TOOL_ALLOW 中）
-- 即使在 `tools.allow` 中添加 `"message"`，模型也可能不会调用它（取决于 provider 的 tool schema）
-- `exec` + `openclaw message send` 是最可靠的方案——所有 agent 都有 `exec` 工具
-- 每条消息约耗时 2-3 秒（包含 proxy 连接时间）
+**陷阱**：
+- gateway 重启时可能会立即重建某些 session（如正在等待 announce 的父会话），导致清理后文件立刻重新出现
+- 解决：清理后立即覆写 `sessions.json` 为 `{}`，然后重启 gateway
+- `launchctl kickstart -k` 比 `bootout + bootstrap` 更可靠（-k 表示 kill + restart）
 
-**SOUL.md 三步走派发流程** (chief-director):
-
-```
-# 第一步：在团队频道公告调度计划
-exec({ "command": "openclaw message send --channel discord --target 1475813925772722228 --message '📋 【任务调度】@笔锋 → 写文章 | @灵犀 → 写文案 | 派发中...'" })
-
-# 第二步：sessions_spawn 实际派发
-sessions_spawn({ "agentId": "content-editor", "task": "...", "mode": "run" })
-
-# 第三步：频道公告结果
-exec({ "command": "openclaw message send --channel discord --target 1475813925772722228 --message '✅ 【完成汇总】@笔锋 已完成 | @灵犀 已完成'" })
-```
-
-**普通 Agent 通信协议** (content-editor 等):
-
-| 时机 | 消息格式 |
-|------|---------|
-| 收到任务 | `📥 【接单】收到任务：xxx | 预计完成：xx:xx` |
-| 关键进展 | `🔄 【进展】xxx | 已完成：xxx | 进行中：xxx` |
-| 任务完成 | `✅ 【完成】xxx | 交付物：xxx` |
-| 遇到问题 | `⚠️ 【问题】xxx | 需要：谁的协助` |
-
-## 五、Star-Office-UI 可视化监控
+## 七、Star-Office-UI 可视化监控
 
 ### 架构
 
@@ -272,51 +532,27 @@ Star-Office-UI (port 18800, 读取 state.json)
 
 ```python
 POLL_INTERVAL = 5        # 扫描间隔（秒）
-ACTIVE_THRESHOLD = 300   # 活跃判定阈值（秒）— 5分钟，因为 thinking 模型单次 API 调用可达 2 分钟
+ACTIVE_THRESHOLD = 300   # 活跃判定阈值（秒）— thinking 模型单次 API 调用可达 2 分钟
 ```
 
-### ⚠️ 活跃检测：双信号机制
+### 活跃检测：双信号机制
 
 单独用任何一种信号都不够可靠：
 
 | 检测方式 | 优势 | 缺陷 |
 |---------|------|------|
 | `.jsonl` mtime | 实际会话活动的直接证据 | LLM API 调用期间（30-120s）不更新 |
-| `sessions.json` mtime | 更新频率高 | gateway 重启会刷新所有文件 |
 | `sessions.json` 内容的 `updatedAt` | 精确记录每个 session 的更新时间 | 需要解析 JSON |
 
-**正确的检测逻辑 — 双信号取 OR**:
+正确做法：双信号取 OR — 任一信号在 ACTIVE_THRESHOLD 内更新即判定活跃。
 
-```python
-def _is_agent_active(sessions_dir, now):
-    # Signal 1: .jsonl file mtime
-    _, jsonl_mtime = _find_latest_session_file(sessions_dir)
-    if jsonl_mtime > 0 and now - jsonl_mtime < ACTIVE_THRESHOLD:
-        return True
+### app.py AUTO_IDLE_TTL 陷阱
 
-    # Signal 2: sessions.json content — updatedAt 字段
-    # 捕获 LLM 调用期间 jsonl 未更新但 session 已注册的情况
-    session_ts = _get_latest_session_updated_at(sessions_dir)
-    if session_ts > 0 and now - session_ts < ACTIVE_THRESHOLD:
-        return True
+`app.py` 的 `/status` 端点有 `_apply_auto_idle()` 函数，超过 `AUTO_IDLE_TTL` 秒后强制重置为 idle。
 
-    return False
+**必须设置 `AUTO_IDLE_TTL = 600`**（不能小于 ACTIVE_THRESHOLD）。
 
-def _get_latest_session_updated_at(sessions_dir):
-    """Parse sessions.json to find most recent updatedAt (ms → seconds)."""
-    try:
-        with open(sessions_dir / "sessions.json") as f:
-            data = json.load(f)
-        max_ts = 0
-        for key, val in data.items():
-            if isinstance(val, dict):
-                ts = val.get("updatedAt", 0)
-                if isinstance(ts, (int, float)) and ts > max_ts:
-                    max_ts = ts
-        return max_ts / 1000.0 if max_ts > 0 else 0
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return 0
-```
+**monitor.py 必须每次 poll 都刷新活跃 agent 的 `updated_at`**，不仅仅在状态变化时。否则状态持续不变时 app.py 会误判为 idle。
 
 ### 状态检测规则（从 jsonl 末尾 8KB 反向扫描）
 
@@ -330,141 +566,73 @@ def _get_latest_session_updated_at(sessions_dir):
 | `"error"` + `"role":"system"` | error |
 | 无匹配 / 文件不存在 | idle |
 
-### ⚠️ app.py AUTO_IDLE_TTL 陷阱（关键 Bug）
-
-`app.py` 的 `/status` 端点有一个 `_apply_auto_idle()` 函数，会在 `updated_at` 超过 `AUTO_IDLE_TTL` 秒后强制将 agent 状态改回 idle。
-
-**问题链**:
-1. monitor.py 检测到 agent 活跃，写入 `state = "writing"`, `updated_at = now`
-2. monitor.py 只在状态**变化**时更新 `updated_at`
-3. agent 持续 writing，状态不变，`updated_at` 不刷新
-4. `AUTO_IDLE_TTL` 秒后，`_apply_auto_idle` 在 `/status` 返回前强制重置为 idle
-5. UI 轮询 `/status` 看到 idle，agent 回到休息区
-
-**修复（两处都必须改）**:
-
-```python
-# app.py — 增大 TTL，让 monitor.py 负责真正的 idle 检测
-AUTO_IDLE_TTL = 600  # 原来是 25，远小于 ACTIVE_THRESHOLD
-
-# monitor.py — 每次 poll 都刷新活跃 agent 的 updated_at，不仅仅在状态变化时
-if active:
-    # ... detect state ...
-    if agent.get("state") != new_state:
-        agent["state"] = new_state
-        agent["updated_at"] = str(now)
-        changed = True
-    else:
-        # 即使状态没变，也刷新时间戳，防止 app.py 的 safety-net 误判
-        agent["updated_at"] = str(now)
-        changed = True
-```
-
 ### UI 状态映射
 
-UI 需要为所有 monitor.py 能输出的状态定义 STATE_COLORS、ZONES 和 BUBBLES，否则未映射状态（如 `dispatching`）会 fallback 到 idle 区域。
-
 ```javascript
-// 必须在 index.html 中添加:
+// index.html 中必须包含所有 monitor 能输出的状态
 STATE_COLORS.dispatching = '#E056A0';
 ZONES.dispatching = { label: 'Meeting', rects: [[350, 60, 260, 140]] };
-BUBBLES.dispatching = ['📋 派发任务', '🚀 分配', '📤 调度'];
+BUBBLES.dispatching = ['调度任务', '分配', '协调'];
 ```
 
-### 常见问题
+## 八、代理架构（Proxy）
 
-| 问题 | 原因 | 修复 |
-|------|------|------|
-| Agent 在工作但 25 秒后回到休息区 | `app.py` 的 `AUTO_IDLE_TTL=25` 太短 + monitor 不刷新时间戳 | AUTO_IDLE_TTL=600 + monitor 每 poll 刷新 updated_at |
-| Agent 在工作但可视化显示 idle | ACTIVE_THRESHOLD 太短（LLM 调用期间 jsonl 不更新） | 改为 300 秒 + 启用 sessions.json updatedAt 双信号 |
-| 所有 agent 都显示非 idle | sessions.json mtime 被 gateway 重启刷新 | 不用 sessions.json mtime，用其 JSON 内容的 updatedAt |
-| 可视化不更新 | 多个 monitor 进程冲突 | `pkill -f monitor.py` 杀掉所有旧进程再重启 |
-| state.json 解析失败 | 文件损坏（多余的 `}`） | 手动修复 JSON |
-| dispatching 状态 agent 在休息区 | UI 缺少 dispatching 的颜色/区域/气泡映射 | 添加到 STATE_COLORS、ZONES、BUBBLES |
-| 部分 agent 检测到、部分没检测到 | 只用单信号、阈值不够 | 双信号 OR + 300s 阈值 |
+| 方案 | WebSocket | fetch/REST | 推荐 |
+|------|-----------|-----------|------|
+| `proxy-preload.cjs` | 不影响 | 生效 | 唯一正解 |
+| `--use-env-proxy` | 断连 | 生效 | 绝对不用 |
+| `all_proxy=socks5://` | 不兼容 | 不兼容 | 绝对不用 |
 
-## 六、代理架构（Proxy）
+`proxy-preload.cjs` 只调用 `setGlobalDispatcher(new EnvHttpProxyAgent())`，仅影响 undici fetch，不碰 ws 库的 WebSocket。
 
-### 方案对比
+## 九、端到端编排检查清单
 
-| 方案 | WebSocket | fetch/REST | memorySearch | 推荐 |
-|------|-----------|-----------|-------------|------|
-| `--use-env-proxy` | ❌ 断连 | ✅ | ✅ | ❌ 绝对不用 |
-| `proxy-preload.cjs` | ✅ 不影响 | ✅ | ✅ | ✅ 唯一正解 |
-| `all_proxy=socks5://` | ❌ 不兼容 | ❌ | ❌ | ❌ 绝对不用 |
+新建或修改多 Agent 编排系统时，逐项确认：
 
-### proxy-preload.cjs 原理
+**权限与配置**
+- [ ] 所有 agent 的 `subagents.allowAgents` 已配置（推荐 `["*"]`）
+- [ ] `tools.agentToAgent.enabled: true` + `allow` 列表完整
+- [ ] `tools.sessions.visibility: "all"`
+- [ ] 每个 agent 配置了 `groupChat.mentionPatterns`
+- [ ] 协作频道已创建，所有 agent 绑定了该频道
 
-```
-NODE_OPTIONS=--require=/path/to/proxy-preload.cjs
+**SOUL.md**
+- [ ] chief-director 使用会议优先五步走（开会 → 3轮讨论 → 拍板+执行 → 审核 → Evan汇报）
+- [ ] chief-director 直接回复只用 `NO_REPLY`，且工具调用旁不附带任何文字
+- [ ] 其他 10 个 agent 直接回复只用 `已完成，详见频道。`（不是"好的"，不是 NO_REPLY）
+- [ ] 所有 agent 的 SOUL.md 包含 `## ⛔ 格式禁令`（行首无 emoji + 无结构化汇报 + 叫名字不叫 ID）
+- [ ] 所有 agent 的 SOUL.md 包含 `## 性格与沟通`（叛逆性格 + 说话方式 + 150-250字发言限制）
+- [ ] 所有 agent 的 SOUL.md 包含 `## 📢 团队频道通信`（使用 team-msg.sh）
+- [ ] chief-director 有消息数量控制（每次调度只发一条 embed）
+- [ ] chief-director 有计数规则（spawn N 个 agent 就等 N 个 announce，没到齐就 NO_REPLY）
+- [ ] chief-director 有自动续流规则（拍板=立即spawn执行，不等 Evan 确认）
+- [ ] chief-director 有执行成果处理规则（agent 已上传则不重复上传）
+- [ ] chief-director SOUL.md 中无矛盾指令（"等所有人" vs "收到大多数就推进"）
+- [ ] 所有 SOUL.md 含真实错误示范（比抽象规则有效 10 倍）
 
-proxy-preload.cjs:
-  → undici.setGlobalDispatcher(new EnvHttpProxyAgent())
-  → 只影响 undici 的 fetch（Discord REST API, OpenAI embedding, CDN）
-  → 不影响 ws 库的 WebSocket（ws 用原生 TCP/TLS）
-  → 额外 patch: 移除 Discord 域名的 SSRF guard pinned dispatcher
-```
+**源码 Patch（防止 announce 泄露）**
+- [ ] `shouldSendCompletionDirectly = false`（line ~78473，禁用 Path A）
+- [ ] `buildAnnounceReplyInstruction` 三分支统一为 NO_REPLY 指令（lines ~78649-78651）
+- [ ] `shouldDeliverExternally` 保持原值不动（设为 false 会破坏队列排水）
 
-## 七、OAuth Token 管理
+**team-msg.sh**
+- [ ] 脚本在 `~/.openclaw/bin/team-msg.sh` 且可执行
+- [ ] 11 个 agent 全部有映射（name, color, avatar seed, backgroundColor）
+- [ ] 头像使用 open-peeps 风格 + 彩色圆形背景（dark mode 兼容）
+- [ ] proxy 配置正确（`--proxy http://127.0.0.1:10808`）
 
-### openai-codex Token 同步
+**监控**
+- [ ] `proxy-preload.cjs` 已配置
+- [ ] monitor.py 双信号检测活跃 + 每 poll 刷新 `updated_at`
+- [ ] `ACTIVE_THRESHOLD >= 300` + `AUTO_IDLE_TTL >= 600`
+- [ ] UI 的 STATE_COLORS/ZONES/BUBBLES 覆盖所有状态
 
-Codex CLI 和 OpenClaw 的 OAuth token 没有自动同步机制。
+**生效流程**
+- [ ] SOUL.md 修改后清理所有 agent 会话（备份 .jsonl + 重置 sessions.json）
+- [ ] 使用 `launchctl kickstart -k` 重启 gateway
+- [ ] 验证新会话加载了最新 SOUL.md
 
-```bash
-# 1. 检查 token 状态
-openclaw models auth status
-
-# 2. 如果过期，终端重新登录
-codex  # 自动跳转浏览器登录
-
-# 3. 同步 token
-# 源: ~/.codex/auth.json
-# 目标: ~/.openclaw/agents/main/agent/auth-profiles.json
-```
-
-**字段映射**:
-
-| Codex CLI (auth.json) | OpenClaw (auth-profiles.json) | 转换 |
-|----------------------|------------------------------|------|
-| `access_token` | `access` | 直接复制 |
-| `refresh_token` | `refresh` | 直接复制 |
-| JWT `exp` claim | `expires` | exp × 1000（秒→毫秒） |
-
-```bash
-# 4. 重启 gateway 生效
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
-
-# 5. 验证
-openclaw models auth status
-```
-
-## 八、端到端编排检查清单
-
-新建多 Agent 编排系统时，逐项确认：
-
-```
-□ 所有 agent 的 subagents.allowAgents 已配置（推荐 ["*"]）
-□ tools.agentToAgent.enabled: true + allow 列表完整
-□ tools.sessions.visibility: "all"
-□ 总监/调度者的 SOUL.md 包含 sessions_spawn 使用说明和示例
-□ AGENTS.md 的任务分配模板包含"两步流程"
-□ 协作频道已创建，所有 agent 绑定了该频道
-□ 所有 agent 的 SOUL.md 包含通信协议（`exec` + `openclaw message send` 发频道公告）
-□ chief-director 使用三步走派发流程（公告→spawn→汇总）
-□ 每个 agent 配置了 groupChat.mentionPatterns
-□ proxy-preload.cjs 已配置（plist 中的 NODE_OPTIONS）
-□ monitor.py 使用双信号检测活跃（.jsonl mtime + sessions.json updatedAt 内容）
-□ monitor.py 每次 poll 都刷新活跃 agent 的 updated_at（不仅仅在状态变化时）
-□ ACTIVE_THRESHOLD >= 300 秒（thinking 模型单次调用可达 2 分钟）
-□ app.py 的 AUTO_IDLE_TTL >= 600 秒（不能小于 ACTIVE_THRESHOLD，否则 /status 会提前重置）
-□ index.html 的 STATE_COLORS / ZONES / BUBBLES 包含所有 monitor 输出的状态（含 dispatching）
-□ 只有一个 monitor 进程在运行（`pkill -f monitor.py` 后再启动）
-□ OAuth token 已同步且未过期
-```
-
-## 九、诊断速查
+## 十、诊断速查
 
 ### Agent 没有响应 sessions_spawn
 
@@ -486,16 +654,35 @@ openclaw sessions --all-agents --active 5
 tail -50 /tmp/openclaw/openclaw-$(date +%Y-%m-%d).log | grep -E "spawn|subagent|lane"
 ```
 
-### Agent 结果没有回到 Discord 频道
+### Embed 消息没发出去
 
-1. 确认触发来源：从 Discord 频道触发 → 结果回频道 ✅ / 从 CLI 触发 → 结果回 CLI ❌
-2. `announce` 机制将结果发回**父会话的频道**，不是子 agent 自己的频道
-3. 如果 CLI 触发但需要结果发到 Discord: `openclaw agent --deliver --reply-channel discord --reply-to CHANNEL_ID`
+```bash
+# 手动测试 team-msg.sh
+~/.openclaw/bin/team-msg.sh chief-director '测试消息，请忽略'
+
+# 如果报 error，检查：
+# 1. proxy 是否运行: curl --proxy http://127.0.0.1:10808 https://discord.com/api/v10/gateway
+# 2. bot token 是否有效: 看返回的 HTTP status
+# 3. channel ID 是否正确: 1475813925772722228
+```
+
+### Agent 直接回复太长/格式不对
+
+1. 检查 SOUL.md 是否包含 `## ⚠️ 直接回复规则` 和 `## ⛔ 格式禁令`
+2. 清理该 agent 的会话文件（旧会话可能加载了旧版 SOUL.md）
+3. 重启 gateway
+4. 如果仍不遵守，加强禁令措辞（"违反等于任务失败"比"不建议"有效得多）
+
+### 头像在 dark mode 不可见
+
+- 确认头像 URL 包含 `backgroundColor` 参数
+- 确认不是 transparent 背景
+- 如果 Discord 缓存了旧头像，修改 seed 值强制刷新（加后缀如 `-v4`）
 
 ### 可视化不显示活跃 Agent
 
 ```bash
-# 检查 monitor 进程数
+# 检查 monitor 进程数（只应有一个）
 ps aux | grep monitor.py | grep -v grep
 
 # 检查 .jsonl 文件 mtime
@@ -504,12 +691,7 @@ for agent in chief-director content-editor copywriter; do
   if [ -n "$latest" ]; then
     mt=$(stat -f "%m" "$latest")
     age=$(($(date +%s) - mt))
-    echo "$agent: age=${age}s (threshold=120s)"
+    echo "$agent: age=${age}s (threshold=300s)"
   fi
 done
-
-# 手动测试 monitor
-cd ~/.openclaw/workspace/star-office-ui
-python3 -c "import monitor; monitor.scan_agents()"
-cat state.json | python3 -m json.tool
 ```
