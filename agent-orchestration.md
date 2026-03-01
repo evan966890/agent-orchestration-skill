@@ -233,23 +233,50 @@ Star-Office-UI (port 18800, 读取 state.json)
 
 ```python
 POLL_INTERVAL = 5        # 扫描间隔（秒）
-ACTIVE_THRESHOLD = 120   # 活跃判定阈值（秒）
+ACTIVE_THRESHOLD = 300   # 活跃判定阈值（秒）— 5分钟，因为 thinking 模型单次 API 调用可达 2 分钟
 ```
 
-### ⚠️ 活跃检测陷阱
+### ⚠️ 活跃检测：双信号机制
 
-| 检测方式 | 可靠性 | 原因 |
-|---------|--------|------|
-| sessions.json mtime | ❌ 不可靠 | gateway 重启会刷新所有 sessions.json |
-| *.jsonl mtime | ✅ 可靠 | 只有实际运行的 session 才会写入 jsonl |
+单独用任何一种信号都不够可靠：
 
-**正确的检测逻辑**:
+| 检测方式 | 优势 | 缺陷 |
+|---------|------|------|
+| `.jsonl` mtime | 实际会话活动的直接证据 | LLM API 调用期间（30-120s）不更新 |
+| `sessions.json` mtime | 更新频率高 | gateway 重启会刷新所有文件 |
+| `sessions.json` 内容的 `updatedAt` | 精确记录每个 session 的更新时间 | 需要解析 JSON |
+
+**正确的检测逻辑 — 双信号取 OR**:
 
 ```python
-# 只用 .jsonl 文件 mtime 判断活跃
-latest_jsonl, jsonl_mtime = _find_latest_session_file(sessions_dir)
-if jsonl_mtime > 0 and now - jsonl_mtime < ACTIVE_THRESHOLD:
-    active = True
+def _is_agent_active(sessions_dir, now):
+    # Signal 1: .jsonl file mtime
+    _, jsonl_mtime = _find_latest_session_file(sessions_dir)
+    if jsonl_mtime > 0 and now - jsonl_mtime < ACTIVE_THRESHOLD:
+        return True
+
+    # Signal 2: sessions.json content — updatedAt 字段
+    # 捕获 LLM 调用期间 jsonl 未更新但 session 已注册的情况
+    session_ts = _get_latest_session_updated_at(sessions_dir)
+    if session_ts > 0 and now - session_ts < ACTIVE_THRESHOLD:
+        return True
+
+    return False
+
+def _get_latest_session_updated_at(sessions_dir):
+    """Parse sessions.json to find most recent updatedAt (ms → seconds)."""
+    try:
+        with open(sessions_dir / "sessions.json") as f:
+            data = json.load(f)
+        max_ts = 0
+        for key, val in data.items():
+            if isinstance(val, dict):
+                ts = val.get("updatedAt", 0)
+                if isinstance(ts, (int, float)) and ts > max_ts:
+                    max_ts = ts
+        return max_ts / 1000.0 if max_ts > 0 else 0
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
 ```
 
 ### 状态检测规则（从 jsonl 末尾 8KB 反向扫描）
@@ -257,20 +284,22 @@ if jsonl_mtime > 0 and now - jsonl_mtime < ACTIVE_THRESHOLD:
 | JSONL 内容关键词 | 映射状态 |
 |-----------------|---------|
 | `"exec"`, `"bash"`, `"shell"` | executing |
-| `"websearch"`, `"webfetch"`, `"search"` | researching |
-| `"agentmessage"`, `"sendmessage"` | syncing |
+| `"sessions_spawn"`, `"sessions_send"`, `"subagent"` | dispatching |
+| `"web_search"`, `"web_fetch"`, `"memory_search"` | researching |
+| `"agentmessage"`, `"sendmessage"`, `"message"` | syncing |
 | `"role":"assistant"` | writing |
-| 无匹配 / 文件不存在 | idle |
 | `"error"` + `"role":"system"` | error |
+| 无匹配 / 文件不存在 | idle |
 
 ### 常见问题
 
 | 问题 | 原因 | 修复 |
 |------|------|------|
-| Agent 在工作但可视化显示 idle | ACTIVE_THRESHOLD 太短 | 改为 120 秒 |
-| 所有 agent 都显示非 idle | sessions.json 被 gateway 重启刷新 | 改用 .jsonl mtime |
-| 可视化不更新 | 多个 monitor 进程冲突 | `ps aux \| grep monitor.py`，杀掉旧进程 |
+| Agent 在工作但可视化显示 idle | ACTIVE_THRESHOLD 太短（LLM 调用期间 jsonl 不更新） | 改为 300 秒 + 启用 sessions.json updatedAt 双信号 |
+| 所有 agent 都显示非 idle | sessions.json mtime 被 gateway 重启刷新 | 不用 sessions.json mtime，用其 JSON 内容的 updatedAt |
+| 可视化不更新 | 多个 monitor 进程冲突 | `pkill -f monitor.py` 杀掉所有旧进程再重启 |
 | state.json 解析失败 | 文件损坏（多余的 `}`） | 手动修复 JSON |
+| 部分 agent 检测到、部分没检测到 | 只用单信号、阈值不够 | 双信号 OR + 300s 阈值 |
 
 ## 六、代理架构（Proxy）
 
@@ -342,9 +371,9 @@ openclaw models auth status
 □ 协作频道已创建，所有 agent 绑定了该频道
 □ 每个 agent 配置了 groupChat.mentionPatterns
 □ proxy-preload.cjs 已配置（plist 中的 NODE_OPTIONS）
-□ monitor.py 使用 .jsonl mtime 检测活跃（不是 sessions.json）
-□ ACTIVE_THRESHOLD >= 120 秒
-□ 只有一个 monitor 进程在运行
+□ monitor.py 使用双信号检测活跃（.jsonl mtime + sessions.json updatedAt 内容）
+□ ACTIVE_THRESHOLD >= 300 秒（thinking 模型单次调用可达 2 分钟）
+□ 只有一个 monitor 进程在运行（`pkill -f monitor.py` 后再启动）
 □ OAuth token 已同步且未过期
 ```
 
