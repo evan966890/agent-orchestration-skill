@@ -10,9 +10,10 @@ Provides battle-tested patterns and diagnostics for running 10+ AI agents as a c
 - **SOUL.md authoring**: How to write agent instructions that actually dispatch tasks (not just text @mentions)
 - **Collaboration channel**: Bind all agents to a shared Discord channel with `groupChat.mentionPatterns`
 - **Visual monitoring**: Star-Office-UI `monitor.py` tuning — activity detection, threshold config, state accuracy
+- **team-supervisor**: Unified 24/7 daemon replacing old watchdogs — 6 checks, auto-repair, Discord alerts, agent nudging via `cron.add`
+- **WeChat publishing pipeline**: Tongyi Wanxiang image gen, browser tab cleanup, batch draft fix, `draft/update` field requirements
 - **Proxy architecture**: `proxy-preload.cjs` vs `--use-env-proxy` — why only one of them works
-- **OAuth token sync**: Codex CLI to OpenClaw token synchronization procedure
-- **End-to-end checklist**: 12-point verification for new multi-agent setups
+- **End-to-end checklist**: Comprehensive verification for multi-agent setups (permissions, SOUL.md, patches, monitoring, supervisor, pipeline)
 
 ## Key lessons encoded
 
@@ -26,6 +27,10 @@ Provides battle-tested patterns and diagnostics for running 10+ AI agents as a c
 | 6 | CLI-triggered sessions don't post results to Discord | Results go to the parent session's channel |
 | 7 | `ACTIVE_THRESHOLD = 30` is too short for agent work | Use 120+ seconds |
 | 8 | Multiple monitor processes overwrite each other | Kill stale processes before restarting |
+| 9 | Health API Discord status false positive | Use log-based detection (team-supervisor pattern) |
+| 10 | `draft/update` only sending thumb_media_id | WeChat API requires all article fields; 44004 error |
+| 11 | Tongyi Wanxiang 429 rate limit on batch gen | Add 30s delay between requests |
+| 12 | Browser tab accumulation from pipeline | Close WeChat tabs via CDP HTTP API after operations |
 
 ## Install
 

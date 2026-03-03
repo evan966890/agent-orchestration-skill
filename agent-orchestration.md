@@ -604,7 +604,116 @@ BUBBLES.dispatching = ['调度任务', '分配', '协调'];
 
 `proxy-preload.cjs` 只调用 `setGlobalDispatcher(new EnvHttpProxyAgent())`，仅影响 undici fetch，不碰 ws 库的 WebSocket。
 
-## 九、端到端编排检查清单
+## 九、team-supervisor 自动化守护
+
+### 概述
+
+`~/.openclaw/bin/team-supervisor.py` 是统一的 Python 守护进程，取代了 `discord-watchdog.sh` 和 `discussion-watchdog.py`，每 30 秒轮询 6 项检查，自动修复已知问题。
+
+### Agent Session 催促机制（Check 4）
+
+当 chief-director idle > 5 分钟且无活跃子 session 时，通过 `cron.add` 注入催促消息：
+
+```python
+# 催促消息注入（复用 cron.add 一次性任务模式）
+params = {
+    "name": "Supervisor",
+    "agentId": agent_id,
+    "schedule": {"kind": "at", "at": now_iso},
+    "sessionTarget": "isolated",
+    "wakeMode": "now",
+    "payload": {"kind": "agentTurn", "message": "系统提醒：不要等 Evan 确认，自主决策继续执行。"},
+    "delivery": {"mode": "announce", "channel": "discord", "to": "1475817567313723534"},
+}
+subprocess.run(["openclaw", "gateway", "call", "cron.add", "--json", "--params", json.dumps(params)], ...)
+```
+
+**冷却**: 同一 agent 10 分钟内只催一次。任何 agent idle > 20 分钟发 Discord 告警。
+
+### 启动与调试
+
+```bash
+# 启动（tmux，幂等）
+bash ~/.openclaw/bin/start-supervisor.sh
+
+# 单次运行所有检查
+python3 ~/.openclaw/bin/team-supervisor.py --once
+
+# 只输出不执行
+python3 ~/.openclaw/bin/team-supervisor.py --once --dry-run
+```
+
+### 与已有 watchdog 的关系
+
+| 已有服务 | 被覆盖 | 说明 |
+|---------|--------|------|
+| `discord-watchdog.sh` (launchd 600s) | Check 2 | supervisor 30s 轮询更及时 |
+| `discussion-watchdog.py` (launchd 60s) | Check 4 | supervisor 的 per-agent 去重更精准 |
+
+supervisor 稳定运行 24h 后可禁用旧 watchdog。
+
+## 九-B、微信公众号发布管线
+
+### 完整管线流程
+
+```
+chief-director 产出文章 (.md)
+  ↓
+generate_image.sh (通义万象 qwen-image-max) → 封面图 (.png)
+  ↓
+wechat_publish.py → 上传图片 + 创建草稿
+  ↓
+pipeline.py → 发送预览 + 浏览器自动化确认 + 关闭 tab
+```
+
+### 图片生成（通义万象）
+
+脚本：`~/.openclaw/bin/generate_image.sh`
+
+```bash
+# 用法
+~/.openclaw/bin/generate_image.sh "AI technology futuristic office" /tmp/cover.png 16:9
+
+# 支持比例: 16:9 | 4:3 | 1:1 | 3:4 | 9:16
+```
+
+- API: DashScope `qwen-image-max` 模型（同步调用）
+- 不走代理（`--noproxy '*'`）—— 中国 API 直连
+- JSON 构造用 Python（避免 prompt 中特殊字符破坏 JSON）
+- **限频**: 连续调用需间隔 30 秒，否则 429
+- **内容安全**: 敏感词触发 400，用中性英文 prompt 描述画面
+
+### 浏览器 Tab 清理
+
+`pipeline.py` 在微信公众号后台操作完后自动关闭 WeChat tab：
+
+```python
+def _browser_close_tab(cdp_port: str):
+    """通过 CDP HTTP API 关闭 WeChat tab 防止 tab 堆积"""
+    req = urllib.request.Request(f"http://localhost:{cdp_port}/json")
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        targets = json.loads(resp.read())
+    for t in targets:
+        if t.get("type") == "page" and "mp.weixin.qq.com" in t.get("url", ""):
+            urllib.request.urlopen(
+                urllib.request.Request(f"http://localhost:{cdp_port}/json/close/{t['id']}"),
+                timeout=5
+            )
+```
+
+### 批量修复草稿封面
+
+当图片生成失败导致草稿使用 placeholder 封面时（<10KB 灰色图），修复流程：
+
+1. 获取所有草稿：`client.post("draft/batchget", data={"offset":0,"count":20})`
+2. 下载 thumb_url 检查大小，<10KB 判定为 placeholder
+3. 用通义万象重新生成封面（每张间隔 30 秒防限频）
+4. 上传为永久素材：`client.material.add("image", f)`
+5. 更新草稿（需传完整文章字段）：`client.post("draft/update", data={...})`
+
+**陷阱**: `draft/update` 必须传 title/author/content/thumb_media_id 等所有必填字段，只传 thumb_media_id 会报 44004 "empty content"。
+
+## 九-C、端到端编排检查清单
 
 新建或修改多 Agent 编排系统时，逐项确认：
 
@@ -645,6 +754,19 @@ BUBBLES.dispatching = ['调度任务', '分配', '协调'];
 - [ ] monitor.py 双信号检测活跃 + 每 poll 刷新 `updated_at`
 - [ ] `ACTIVE_THRESHOLD >= 300` + `AUTO_IDLE_TTL >= 600`
 - [ ] UI 的 STATE_COLORS/ZONES/BUBBLES 覆盖所有状态
+
+**team-supervisor**
+- [ ] `team-supervisor.py` 在 tmux 中运行（`start-supervisor.sh`）
+- [ ] 6 项检查全部通过（`--once` 验证）
+- [ ] Discord 连接检查用日志优先逻辑（避免 Health API 误报）
+- [ ] Agent 催促冷却 10 分钟 / 告警去重 30 分钟
+- [ ] 旧 watchdog 确认被 supervisor 覆盖后再禁用
+
+**微信发布管线**
+- [ ] `generate_image.sh` 使用通义万象 qwen-image-max（不走代理）
+- [ ] `pipeline.py` 操作完关闭 WeChat tab（`_browser_close_tab`）
+- [ ] 批量生成封面间隔 30 秒防限频
+- [ ] `draft/update` 传完整文章字段（不只传 thumb_media_id）
 
 **生效流程**
 - [ ] SOUL.md 修改后清理所有 agent 会话（备份 .jsonl + 重置 sessions.json）
