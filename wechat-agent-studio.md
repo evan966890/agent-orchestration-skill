@@ -1,11 +1,11 @@
 ---
-name: agent-orchestration
-description: Discord-based multi-agent orchestration for OpenClaw. Use when setting up agent collaboration, configuring inter-agent communication (sessions_spawn/sessions_send), building collaboration channels, debugging agent dispatch failures, or tuning the Star-Office-UI visualization monitor.
+name: wechat-agent-studio
+description: 12个AI Agent协作运营微信公众号的完整方案。覆盖 Agent 权限配置、Discord 协作频道、会议讨论机制、人格化消息、SOUL.md 编写、team-supervisor 守护进程、微信发布管线（通义万象图片生成 + 浏览器自动化）、可视化监控。
 ---
 
-# Discord 多 Agent 编排技能
+# 多 Agent 公众号工作室
 
-本技能覆盖 OpenClaw 多 Agent 系统的完整编排链路：权限配置 → 任务派发 → 频道通信 → 人格化消息 → 可视化监控。
+12 个 AI Agent 通过 Discord 协作运营微信公众号——从选题讨论、内容创作到封面生成、草稿发布的全自动化方案。
 
 ## 架构总览
 
